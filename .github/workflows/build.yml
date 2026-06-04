@@ -1,0 +1,85 @@
+name: Build & Package
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            zip: GmailMediaExtractor_Windows.zip
+          - os: macos-latest
+            zip: GmailMediaExtractor_macOS.zip
+          - os: ubuntu-latest
+            zip: GmailMediaExtractor_Linux.zip
+
+    runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        working-directory: files
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Write credentials.json from the GitHub Secret so PyInstaller can bundle it
+      - name: Write credentials.json
+        run: python -c "import os; open('credentials.json','w').write(os.environ['CREDS'])"
+        env:
+          CREDS: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+
+      # Patch Microsoft client ID into core.py before build
+      - name: Patch Microsoft client ID
+        run: >
+          python -c "
+          import os; path='core.py';
+          src=open(path).read();
+          src=src.replace('YOUR_AZURE_APP_CLIENT_ID_HERE', os.environ['MS_CLIENT_ID']);
+          open(path,'w').write(src)
+          "
+        env:
+          MS_CLIENT_ID: ${{ secrets.MS_CLIENT_ID }}
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pyinstaller --quiet
+
+      - name: Build
+        run: python -m PyInstaller build.spec --noconfirm
+
+      # ── Package ────────────────────────────────────────────────────────────
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force GmailMediaExtractor
+          Copy-Item dist\GmailMediaExtractor.exe GmailMediaExtractor\
+          Compress-Archive -Path GmailMediaExtractor -DestinationPath ${{ matrix.zip }}
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p GmailMediaExtractor
+          cp -r dist/GmailMediaExtractor.app GmailMediaExtractor/
+          zip -r ${{ matrix.zip }} GmailMediaExtractor/
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p GmailMediaExtractor
+          cp dist/GmailMediaExtractor GmailMediaExtractor/
+          zip -r ${{ matrix.zip }} GmailMediaExtractor/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.zip }}
+          path: files/${{ matrix.zip }}
