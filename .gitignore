@@ -15,3 +15,6 @@ files.zip
 __pycache__/
 *.pyc
 *.pyo
+
+test/
+dp_test/
