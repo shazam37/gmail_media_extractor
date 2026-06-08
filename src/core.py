@@ -168,7 +168,7 @@ def category_from_filename(filename: str) -> Optional[str]:
 # ── Sheets column headers ──────────────────────────────────────────────────
 SHEET_HEADERS = [
     "Timestamp", "Sender Name", "Sender Email", "Receiver Email", "Email Date",
-    "Email Subject", "Filename", "Category", "Source", "Storage Location",
+    "Email Subject", "Filename", "File Size (KB)", "Category", "Source", "Storage Location",
 ]
 
 
@@ -613,6 +613,7 @@ class SheetsLogger:
         email_date: str,
         subject: str,
         filename: str,
+        file_size_kb: float,
         category: str,
         source: str,
         storage: str,
@@ -620,7 +621,7 @@ class SheetsLogger:
         row = [
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             sender_name, sender_email, receiver_email, email_date,
-            subject, filename, category, source, storage,
+            subject, filename, file_size_kb, category, source, storage,
         ]
         with self._lock:
             self._pending.append(row)
@@ -1046,12 +1047,14 @@ class ExtractionWorker:
         sheets: Optional[SheetsLogger],
     ) -> str:
         """Save bytes to local disk or OneDrive. Returns storage location string."""
+        file_size_kb = round(len(data) / 1024, 1)
+
         if self.cfg.storage_mode == "onedrive" and self.cfg.onedrive_client:
             drive_path = f"GmailMedia/{sender_dir}/{email_date}/{category}/{filename}"
             web_url    = self.cfg.onedrive_client.upload(data, drive_path)
             if sheets:
                 sheets.log(sender_name, sender_email, receiver_email, email_date,
-                           subject, filename, category, source, web_url)
+                           subject, filename, file_size_kb, category, source, web_url)
             return web_url
 
         target_dir = self.cfg.output_dir / sender_dir / email_date / category
@@ -1060,7 +1063,7 @@ class ExtractionWorker:
         out_path.write_bytes(data)
         if sheets:
             sheets.log(sender_name, sender_email, receiver_email, email_date,
-                       subject, filename, category, source, str(out_path))
+                       subject, filename, file_size_kb, category, source, str(out_path))
         return str(out_path)
 
     def _authenticate(self) -> "Credentials":
