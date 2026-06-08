@@ -14,10 +14,12 @@ Usage examples:
   python3 run_headless.py --output-dir ~/GmailMedia --after 2024/01/01
   python3 run_headless.py --categories "PDF Documents,Images" --no-sheets
   python3 run_headless.py --list-categories
+  python3 run_headless.py --retry-report ~/GmailMedia/report_20260608_120000.json
 """
 from __future__ import annotations
 
 import argparse
+import json
 import queue
 import signal
 import sys
@@ -69,6 +71,15 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--no-sheets", action="store_true", help="Disable Google Sheets logging")
     p.add_argument("--list-categories", action="store_true", help="Print available categories and exit")
+    p.add_argument(
+        "--retry-report",
+        default="",
+        metavar="REPORT_JSON",
+        help=(
+            "Path to a previous run's report JSON.\n"
+            "Retries only the message IDs that failed in that run."
+        ),
+    )
     return p.parse_args()
 
 
@@ -114,15 +125,32 @@ def main() -> None:
     else:
         categories = set(ALL_CATEGORIES)
 
+    override_ids = None
+    if args.retry_report:
+        report_path = Path(args.retry_report).expanduser()
+        if not report_path.exists():
+            print(f"ERROR: Report not found: {report_path}", file=sys.stderr)
+            sys.exit(1)
+        report_data  = json.loads(report_path.read_text(encoding="utf-8"))
+        override_ids = [
+            f["msg_id"] for f in report_data.get("failures", []) if f.get("msg_id")
+        ]
+        if not override_ids:
+            print("No failed message IDs found in that report — nothing to retry.")
+            return
+
     print("=" * 52)
     print("  Gmail Media Extractor — headless mode")
     print("=" * 52)
     print(f"  Output dir  : {output_dir}")
     print(f"  Categories  : {', '.join(sorted(categories))}")
-    if args.after:
-        print(f"  After       : {args.after}")
-    if args.before:
-        print(f"  Before      : {args.before}")
+    if override_ids is not None:
+        print(f"  Retry mode  : {len(override_ids)} failed IDs from {Path(args.retry_report).name}")
+    else:
+        if args.after:
+            print(f"  After       : {args.after}")
+        if args.before:
+            print(f"  Before      : {args.before}")
     print(f"  Sheets log  : {'disabled' if args.no_sheets else 'enabled'}")
     print()
 
@@ -143,6 +171,7 @@ def main() -> None:
         enable_sheets = not args.no_sheets,
         sheet_id_path = sheet_id_path,
         scan_links    = True,
+        override_ids  = override_ids,
     )
 
     worker = ExtractionWorker(cfg)
@@ -189,6 +218,15 @@ def main() -> None:
             print(f"  Sheets log  : {msg['url']}", flush=True)
 
         elif kind == "done":
+            report_glob = sorted(Path(msg["output_dir"]).glob("report_*.json"))
+            report_hint = (
+                f"\n  Report     : {report_glob[-1]}"
+                if report_glob else ""
+            )
+            errors_hint = (
+                f"\n  Re-run     : python3 run_headless.py --retry-report {report_glob[-1]}"
+                if report_glob and msg.get("errors", 0) > 0 else ""
+            )
             print(
                 f"\n\n{'=' * 52}"
                 f"\n  Done!"
@@ -196,6 +234,8 @@ def main() -> None:
                 f"\n  Skipped    : {msg['skipped']:,}"
                 f"\n  Errors     : {msg['errors']:,}"
                 f"\n  Files in   : {msg['output_dir']}"
+                f"{report_hint}"
+                f"{errors_hint}"
                 f"\n{'=' * 52}",
                 flush=True,
             )

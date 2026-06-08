@@ -1,8 +1,10 @@
 # OAuth app credentials — store content as GitHub Secret GOOGLE_CREDENTIALS_JSON
 files/credentials.json
+src/credentials.json
 
 # User auth token and app data
 files/.app_data/
+src/.app_data/
 
 # Build artifacts
 files/dist/
@@ -10,6 +12,10 @@ files/build/
 files/GmailMediaExtractor/
 files/GmailMediaExtractor_*.zip
 files.zip
+src/dist/
+src/build/
+src/GmailMediaExtractor/
+src/*.zip
 
 # Python
 __pycache__/

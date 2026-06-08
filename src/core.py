@@ -47,6 +47,52 @@ try:
 except ImportError:
     MSAL_OK = False
 
+# ── Retry helpers ──────────────────────────────────────────────────────────
+
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+
+
+def _gapi_retry(fn, *, attempts: int = 4):
+    """Retry a Google API callable on transient HTTP or network errors."""
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except HttpError as exc:
+            if attempt < attempts - 1 and exc.resp.status in _RETRYABLE_STATUS:
+                time.sleep(2 ** attempt)
+                continue
+            raise
+        except OSError:
+            if attempt < attempts - 1:
+                time.sleep(2 ** attempt)
+                continue
+            raise
+
+
+def _req_retry(fn, *, attempts: int = 4):
+    """Retry a requests call on transient HTTP status codes or network errors."""
+    for attempt in range(attempts):
+        try:
+            resp = fn()
+            if resp.status_code in _RETRYABLE_STATUS and attempt < attempts - 1:
+                time.sleep(2 ** attempt)
+                continue
+            return resp
+        except Exception as exc:
+            is_transient = isinstance(exc, OSError)
+            if REQUESTS_OK:
+                is_transient = is_transient or isinstance(
+                    exc,
+                    (_req.exceptions.ConnectionError,
+                     _req.exceptions.Timeout,
+                     _req.exceptions.ChunkedEncodingError),
+                )
+            if is_transient and attempt < attempts - 1:
+                time.sleep(2 ** attempt)
+                continue
+            raise
+
+
 # Google OAuth scopes: Gmail (read) + Sheets (log)
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
@@ -340,17 +386,16 @@ def download_onedrive_link(
     if ms_token:
         headers["Authorization"] = f"Bearer {ms_token}"
 
-    resp = _req.get(
+    resp = _req_retry(lambda: _req.get(
         f"https://graph.microsoft.com/v1.0/shares/{share_token}/driveItem",
         headers=headers,
         timeout=30,
-    )
+    ))
     if not resp.ok:
-        # Retry unauthenticated (fully public links)
-        resp = _req.get(
+        resp = _req_retry(lambda: _req.get(
             f"https://api.onedrive.com/v1.0/shares/{share_token}/driveItem",
             timeout=30,
-        )
+        ))
     if not resp.ok:
         return None
 
@@ -360,7 +405,7 @@ def download_onedrive_link(
     if not dl_url:
         return None
 
-    file_resp = _req.get(dl_url, timeout=120)
+    file_resp = _req_retry(lambda u=dl_url: _req.get(u, timeout=120))
     if file_resp.ok:
         return file_resp.content, filename
     return None
@@ -431,11 +476,11 @@ class OneDriveClient:
     def file_exists(self, drive_path: str) -> bool:
         """Return True if the file exists at drive_path on the user's OneDrive."""
         self._refresh_token()
-        resp = _req.get(
-            f"{self.GRAPH}/me/drive/root:/{drive_path}",
+        resp = _req_retry(lambda p=drive_path: _req.get(
+            f"{self.GRAPH}/me/drive/root:/{p}",
             headers=self._headers(),
             timeout=15,
-        )
+        ))
         return resp.status_code == 200
 
     def _refresh_token(self):
@@ -461,47 +506,54 @@ class OneDriveClient:
         self._refresh_token()
         url = f"{self.GRAPH}/me/drive/root:/{drive_path}:/content"
         if len(file_bytes) <= 4 * 1024 * 1024:
-            resp = _req.put(
+            resp = _req_retry(lambda: _req.put(
                 url,
                 headers={**self._headers(), "Content-Type": "application/octet-stream"},
                 data=file_bytes,
                 timeout=60,
-            )
+            ))
             if not resp.ok:
                 raise RuntimeError(
                     f"OneDrive upload failed ({resp.status_code}): {drive_path}"
                 )
             return resp.json().get("webUrl", drive_path)
 
-        # Large file: resumable upload session
-        sess = _req.post(
-            f"{self.GRAPH}/me/drive/root:/{drive_path}:/createUploadSession",
-            headers=self._headers(),
-            json={"item": {"@microsoft.graph.conflictBehavior": "rename"}},
-            timeout=30,
-        )
-        if not sess.ok:
-            raise RuntimeError(
-                f"OneDrive upload session failed ({sess.status_code}): {drive_path}"
-            )
-        upload_url = sess.json()["uploadUrl"]
-        chunk_size = 10 * 1024 * 1024
-        total = len(file_bytes)
-        resp = None
-        for start in range(0, total, chunk_size):
-            chunk = file_bytes[start : start + chunk_size]
-            end = start + len(chunk) - 1
-            resp = _req.put(
-                upload_url,
-                data=chunk,
-                headers={"Content-Range": f"bytes {start}-{end}/{total}"},
-                timeout=120,
-            )
-            if resp.status_code not in (200, 201, 202):
-                raise RuntimeError(
-                    f"OneDrive chunk upload failed ({resp.status_code}): {drive_path}"
-                )
-        return resp.json().get("webUrl", drive_path) if resp else drive_path
+        # Large file: resumable upload session — restart the whole session on failure
+        for _attempt in range(4):
+            try:
+                sess = _req_retry(lambda: _req.post(
+                    f"{self.GRAPH}/me/drive/root:/{drive_path}:/createUploadSession",
+                    headers=self._headers(),
+                    json={"item": {"@microsoft.graph.conflictBehavior": "rename"}},
+                    timeout=30,
+                ))
+                if not sess.ok:
+                    raise RuntimeError(
+                        f"OneDrive upload session failed ({sess.status_code}): {drive_path}"
+                    )
+                upload_url = sess.json()["uploadUrl"]
+                chunk_size = 10 * 1024 * 1024
+                total = len(file_bytes)
+                resp = None
+                for start in range(0, total, chunk_size):
+                    chunk = file_bytes[start : start + chunk_size]
+                    end = start + len(chunk) - 1
+                    resp = _req_retry(lambda c=chunk, s=start, e=end, u=upload_url: _req.put(
+                        u, data=c,
+                        headers={"Content-Range": f"bytes {s}-{e}/{total}"},
+                        timeout=120,
+                    ))
+                    if resp.status_code not in (200, 201, 202):
+                        raise RuntimeError(
+                            f"OneDrive chunk upload failed ({resp.status_code}): {drive_path}"
+                        )
+                return resp.json().get("webUrl", drive_path) if resp else drive_path
+            except RuntimeError:
+                if _attempt < 3:
+                    time.sleep(2 ** _attempt)
+                    self._refresh_token()
+                    continue
+                raise
 
 
 # ── Google Sheets logger ───────────────────────────────────────────────────
@@ -567,7 +619,7 @@ class SheetsLogger:
             if not self._pending or not self._sheet_id:
                 return
             rows, self._pending = self._pending[:], []
-        try:
+        def _do():
             with _http_exec_lock:   # Sheets API also uses httplib2 — must serialize with Gmail calls
                 self._svc.spreadsheets().values().append(
                     spreadsheetId=self._sheet_id,
@@ -576,6 +628,8 @@ class SheetsLogger:
                     insertDataOption="INSERT_ROWS",
                     body={"values": rows},
                 ).execute()
+        try:
+            _gapi_retry(_do)
         except Exception:
             pass  # Sheets errors must not abort extraction
 
@@ -597,6 +651,7 @@ class WorkerConfig:
     enable_sheets:   bool = True
     sheet_id_path:   Optional[Path] = None
     scan_links:      bool = True    # scan email body for OneDrive links
+    override_ids:    Optional[list] = None  # if set, skip _list_ids and process these msg IDs only
 
 
 class ExtractionWorker:
@@ -649,25 +704,33 @@ class ExtractionWorker:
         if self.cfg.before:
             qparts.append(f"before:{self.cfg.before}")
 
-        try:
-            ids = self._list_ids(gmail, " ".join(qparts))
-        except Exception as exc:
-            self._emit("error", text=f"Failed to list emails:\n{exc}")
-            return
-
-        total = len(ids)
-        self._emit("total", count=total)
-        self._emit("status", text=f"📬  {total:,} emails to scan. Starting download…")
+        if self.cfg.override_ids is not None:
+            ids   = self.cfg.override_ids
+            total = len(ids)
+            self._emit("total", count=total)
+            self._emit("status", text=f"🔁  Retrying {total:,} previously failed item(s)…")
+        else:
+            try:
+                ids = self._list_ids(gmail, " ".join(qparts))
+            except Exception as exc:
+                self._emit("error", text=f"Failed to list emails:\n{exc}")
+                return
+            total = len(ids)
+            self._emit("total", count=total)
+            self._emit("status", text=f"📬  {total:,} emails to scan. Starting download…")
 
         active_mime  = {m for m, cat in MIME_TO_CATEGORY.items() if cat in self.cfg.categories}
         state_lock   = threading.Lock()
         state        = {"downloaded": 0, "skipped": 0, "errors": 0}
         records: list[dict] = []
         records_lock = threading.Lock()
+        failures: list[dict] = []
+        failures_lock = threading.Lock()
 
         def _submit(msg_id: str):
             self._process_one(msg_id, creds, active_mime, sheets,
-                              state, state_lock, records, records_lock)
+                              state, state_lock, records, records_lock,
+                              failures, failures_lock)
 
         done = 0
         try:
@@ -708,6 +771,7 @@ class ExtractionWorker:
                 "skipped_already_downloaded": skipped_manifest,
                 "errors": errors,
             },
+            "failures": failures,
             "files": records,
         }
         self.cfg.output_dir.mkdir(parents=True, exist_ok=True)
@@ -740,26 +804,25 @@ class ExtractionWorker:
         state_lock: threading.Lock,
         records: list,
         records_lock: threading.Lock,
+        failures: list,
+        failures_lock: threading.Lock,
     ):
         """Fetch and process a single email. Runs inside a thread-pool worker."""
         svc = self._get_gmail(creds)
 
-        msg = None
-        for _attempt in range(4):
-            try:
-                with _http_exec_lock:
-                    msg = svc.users().messages().get(
-                        userId="me", id=msg_id, format="full"
-                    ).execute()
-                break
-            except HttpError as e:
-                if _attempt < 3 and e.resp.status in (429, 500, 503):
-                    time.sleep(2 ** _attempt)  # 1 s, 2 s, 4 s
-                else:
-                    with state_lock:
-                        state["errors"] += 1
-                    return
-        if msg is None:
+        def _fetch_msg():
+            with _http_exec_lock:
+                return svc.users().messages().get(
+                    userId="me", id=msg_id, format="full"
+                ).execute()
+        try:
+            msg = _gapi_retry(_fetch_msg)
+        except Exception as exc:
+            with failures_lock:
+                failures.append({"msg_id": msg_id, "step": "fetch_message", "reason": str(exc)})
+            self._emit("status", text=f"⚠️  Could not fetch email {msg_id}: {exc}")
+            with state_lock:
+                state["errors"] += 1
             return
 
         hdrs         = {h["name"]: h["value"]
@@ -818,25 +881,24 @@ class ExtractionWorker:
                     self.cfg.manifest.remove(manifest_key, safe_name)
                     self.cfg.manifest.claim(manifest_key, safe_name)
 
-            att = None
-            for _attempt in range(4):
-                try:
-                    with _http_exec_lock:
-                        att = svc.users().messages().attachments().get(
-                            userId="me", messageId=msg_id, id=att_id
-                        ).execute()
-                    break
-                except HttpError as e:
-                    if _attempt < 3 and e.resp.status in (429, 500, 503):
-                        time.sleep(2 ** _attempt)
-                    else:
-                        with state_lock:
-                            state["errors"] += 1
-                        break
-            if att is None:
+            def _fetch_att(aid=att_id):
+                with _http_exec_lock:
+                    return svc.users().messages().attachments().get(
+                        userId="me", messageId=msg_id, id=aid
+                    ).execute()
+            try:
+                att = _gapi_retry(_fetch_att)
+            except Exception as exc:
+                with failures_lock:
+                    failures.append({
+                        "msg_id": msg_id, "step": "fetch_attachment",
+                        "filename": safe_name, "reason": str(exc),
+                    })
+                self._emit("status", text=f"⚠️  Could not fetch attachment {safe_name}: {exc}")
+                with state_lock:
+                    state["errors"] += 1
                 continue
             raw = base64.urlsafe_b64decode(att.get("data", "") + "==")
-
 
             try:
                 storage_loc = self._store(
@@ -844,6 +906,11 @@ class ExtractionWorker:
                     sender_name, sender_email, subject, "Direct Attachment", sheets,
                 )
             except RuntimeError as exc:
+                with failures_lock:
+                    failures.append({
+                        "msg_id": msg_id, "step": "store",
+                        "filename": safe_name, "reason": str(exc),
+                    })
                 self._emit("status", text=f"⚠️  {exc}")
                 with state_lock:
                     state["errors"] += 1
@@ -870,7 +937,15 @@ class ExtractionWorker:
                     return
                 try:
                     result = download_onedrive_link(link_url, ms_token)
-                except Exception:
+                except Exception as exc:
+                    with failures_lock:
+                        failures.append({
+                            "msg_id": msg_id, "step": "onedrive_link",
+                            "url": link_url, "reason": str(exc),
+                        })
+                    self._emit("status", text=f"⚠️  OneDrive link failed after retries: {exc}")
+                    with state_lock:
+                        state["errors"] += 1
                     continue
                 if result is None:
                     continue
@@ -914,6 +989,11 @@ class ExtractionWorker:
                         sender_name, sender_email, subject, "OneDrive Link", sheets,
                     )
                 except RuntimeError as exc:
+                    with failures_lock:
+                        failures.append({
+                            "msg_id": msg_id, "step": "store_onedrive_link",
+                            "filename": safe_name, "url": link_url, "reason": str(exc),
+                        })
                     self._emit("status", text=f"⚠️  {exc}")
                     with state_lock:
                         state["errors"] += 1
@@ -1007,15 +1087,7 @@ class ExtractionWorker:
             kwargs = {"userId": "me", "q": query, "maxResults": 500}
             if page_token:
                 kwargs["pageToken"] = page_token
-            for _attempt in range(4):
-                try:
-                    res = service.users().messages().list(**kwargs).execute()
-                    break
-                except HttpError as e:
-                    if _attempt < 3 and e.resp.status in (429, 500, 503):
-                        time.sleep(2 ** _attempt)
-                    else:
-                        raise
+            res = _gapi_retry(lambda kw=kwargs: service.users().messages().list(**kw).execute())
             ids       += [m["id"] for m in res.get("messages", [])]
             page_token = res.get("nextPageToken")
             if not page_token:
