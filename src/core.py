@@ -167,7 +167,7 @@ def category_from_filename(filename: str) -> Optional[str]:
 
 # ── Sheets column headers ──────────────────────────────────────────────────
 SHEET_HEADERS = [
-    "Timestamp", "Sender Name", "Sender Email", "Email Date",
+    "Timestamp", "Sender Name", "Sender Email", "Receiver Email", "Email Date",
     "Email Subject", "Filename", "Category", "Source", "Storage Location",
 ]
 
@@ -320,6 +320,17 @@ def parse_sender(from_header: str) -> tuple[str, str]:
         return name, m.group(2).strip().lower()
     addr = from_header.strip().lower()
     return addr, addr
+
+
+def parse_recipients(to_header: str) -> str:
+    """Extract all email addresses from a To/CC header string."""
+    if not to_header:
+        return ""
+    addresses = re.findall(r'<([^>]+)>', to_header)
+    if not addresses:
+        # Plain addresses without angle brackets, split by comma
+        addresses = [a.strip().lower() for a in to_header.split(",") if a.strip()]
+    return ", ".join(a.lower() for a in addresses)
 
 
 def parse_email_date(date_header: str) -> str:
@@ -598,6 +609,7 @@ class SheetsLogger:
         self,
         sender_name: str,
         sender_email: str,
+        receiver_email: str,
         email_date: str,
         subject: str,
         filename: str,
@@ -607,7 +619,7 @@ class SheetsLogger:
     ):
         row = [
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            sender_name, sender_email, email_date,
+            sender_name, sender_email, receiver_email, email_date,
             subject, filename, category, source, storage,
         ]
         with self._lock:
@@ -830,12 +842,13 @@ class ExtractionWorker:
                 state["errors"] += 1
             return
 
-        hdrs         = {h["name"]: h["value"]
-                        for h in msg.get("payload", {}).get("headers", [])}
+        hdrs           = {h["name"]: h["value"]
+                          for h in msg.get("payload", {}).get("headers", [])}
         sender_name, sender_email = parse_sender(hdrs.get("From", "unknown"))
-        subject      = hdrs.get("Subject", "(no subject)")
-        email_date   = parse_email_date(hdrs.get("Date", ""))
-        sender_dir   = sanitise_dirname(sender_email or sender_name)
+        receiver_email = parse_recipients(hdrs.get("To", ""))
+        subject        = hdrs.get("Subject", "(no subject)")
+        email_date     = parse_email_date(hdrs.get("Date", ""))
+        sender_dir     = sanitise_dirname(sender_email or sender_name)
 
         # ── Direct attachments ─────────────────────────────────────────────
         payload = msg.get("payload", {})
@@ -908,7 +921,7 @@ class ExtractionWorker:
             try:
                 storage_loc = self._store(
                     raw, safe_name, sender_dir, email_date, category,
-                    sender_name, sender_email, subject, "Direct Attachment", sheets,
+                    sender_name, sender_email, receiver_email, subject, "Direct Attachment", sheets,
                 )
             except RuntimeError as exc:
                 with failures_lock:
@@ -991,7 +1004,7 @@ class ExtractionWorker:
                 try:
                     storage_loc = self._store(
                         link_bytes, safe_name, sender_dir, email_date, link_cat,
-                        sender_name, sender_email, subject, "OneDrive Link", sheets,
+                        sender_name, sender_email, receiver_email, subject, "OneDrive Link", sheets,
                     )
                 except RuntimeError as exc:
                     with failures_lock:
@@ -1027,6 +1040,7 @@ class ExtractionWorker:
         category: str,
         sender_name: str,
         sender_email: str,
+        receiver_email: str,
         subject: str,
         source: str,
         sheets: Optional[SheetsLogger],
@@ -1036,7 +1050,7 @@ class ExtractionWorker:
             drive_path = f"GmailMedia/{sender_dir}/{email_date}/{category}/{filename}"
             web_url    = self.cfg.onedrive_client.upload(data, drive_path)
             if sheets:
-                sheets.log(sender_name, sender_email, email_date,
+                sheets.log(sender_name, sender_email, receiver_email, email_date,
                            subject, filename, category, source, web_url)
             return web_url
 
@@ -1045,7 +1059,7 @@ class ExtractionWorker:
         out_path = unique_path(target_dir, filename)
         out_path.write_bytes(data)
         if sheets:
-            sheets.log(sender_name, sender_email, email_date,
+            sheets.log(sender_name, sender_email, receiver_email, email_date,
                        subject, filename, category, source, str(out_path))
         return str(out_path)
 
