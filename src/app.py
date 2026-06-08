@@ -262,6 +262,7 @@ class App(ctk.CTk):
         body.pack(fill="both", expand=True)
 
         self._build_date_section(body)
+        self._build_source_section(body)
         self._build_type_section(body)
         self._build_storage_section(body)
         self._build_options_section(body)
@@ -293,6 +294,50 @@ class App(ctk.CTk):
         ctk.CTkLabel(to_row, text="To", **label_kw).pack(side="left", padx=(0, 12))
         self._before_sel = DateSelector(to_row)
         self._before_sel.pack(side="left")
+
+    def _build_source_section(self, parent):
+        SectionHeader(parent, "EMAIL SOURCE").pack(anchor="w", padx=24, pady=(24, 10))
+
+        card = Card(parent)
+        card.pack(fill="x", padx=24, pady=(0, 4))
+
+        inner = ctk.CTkFrame(card, fg_color="transparent")
+        inner.pack(fill="x", padx=20, pady=18)
+
+        self._direction_var = ctk.StringVar(value="both")
+
+        radio_kw = dict(
+            variable=self._direction_var,
+            font=ctk.CTkFont(size=19),
+            text_color=C["text"],
+            fg_color=C["accent"],
+            hover_color=C["accent_h"],
+            border_color=C["border"],
+        )
+
+        row = ctk.CTkFrame(inner, fg_color="transparent")
+        row.pack(fill="x")
+
+        ctk.CTkRadioButton(
+            row, text="  📨  Both (received & sent)",
+            value="both", **radio_kw,
+        ).pack(side="left", padx=(0, 28))
+
+        ctk.CTkRadioButton(
+            row, text="  📥  Received only",
+            value="received", **radio_kw,
+        ).pack(side="left", padx=(0, 28))
+
+        ctk.CTkRadioButton(
+            row, text="  📤  Sent only",
+            value="sent", **radio_kw,
+        ).pack(side="left")
+
+        ctk.CTkLabel(
+            inner,
+            text="Choose which emails to scan for attachments and shared files.",
+            font=ctk.CTkFont(size=16), text_color=C["muted"],
+        ).pack(anchor="w", pady=(12, 0))
 
     def _build_type_section(self, parent):
         SectionHeader(parent, "WHAT TO DOWNLOAD").pack(anchor="w", padx=24, pady=(24, 10))
@@ -767,19 +812,20 @@ class App(ctk.CTk):
         cats = {c for c, v in self._cat_vars.items() if v.get()}
 
         cfg = WorkerConfig(
-            output_dir      = self._output_dir,
-            categories      = cats,
-            after           = self._after_sel.get(),
-            before          = self._before_sel.get(),
-            creds_path      = CREDS_PATH,
-            token_path      = TOKEN_PATH,
-            manifest        = self._manifest,
-            msg_queue       = self._q,
-            storage_mode    = mode,
-            onedrive_client = self._ms_client if mode == "onedrive" else None,
-            enable_sheets   = self._sheets_var.get(),
-            sheet_id_path   = SHEET_ID_PATH if self._sheets_var.get() else None,
-            scan_links      = self._scan_links_var.get(),
+            output_dir       = self._output_dir,
+            categories       = cats,
+            after            = self._after_sel.get(),
+            before           = self._before_sel.get(),
+            creds_path       = CREDS_PATH,
+            token_path       = TOKEN_PATH,
+            manifest         = self._manifest,
+            msg_queue        = self._q,
+            storage_mode     = mode,
+            onedrive_client  = self._ms_client if mode == "onedrive" else None,
+            enable_sheets    = self._sheets_var.get(),
+            sheet_id_path    = SHEET_ID_PATH if self._sheets_var.get() else None,
+            scan_links       = self._scan_links_var.get(),
+            email_direction  = self._direction_var.get(),
         )
         self._worker = ExtractionWorker(cfg)
         self._thread = threading.Thread(target=self._worker.run, daemon=True)

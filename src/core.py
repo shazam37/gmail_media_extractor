@@ -652,6 +652,7 @@ class WorkerConfig:
     sheet_id_path:   Optional[Path] = None
     scan_links:      bool = True    # scan email body for OneDrive links
     override_ids:    Optional[list] = None  # if set, skip _list_ids and process these msg IDs only
+    email_direction: str = "both"   # "both" | "received" | "sent"
 
 
 class ExtractionWorker:
@@ -703,6 +704,10 @@ class ExtractionWorker:
             qparts.append(f"after:{self.cfg.after}")
         if self.cfg.before:
             qparts.append(f"before:{self.cfg.before}")
+        if self.cfg.email_direction == "received":
+            qparts.append("-in:sent")
+        elif self.cfg.email_direction == "sent":
+            qparts.append("in:sent")
 
         if self.cfg.override_ids is not None:
             ids   = self.cfg.override_ids

@@ -80,6 +80,17 @@ def parse_args() -> argparse.Namespace:
             "Retries only the message IDs that failed in that run."
         ),
     )
+    p.add_argument(
+        "--direction",
+        default="both",
+        choices=["both", "received", "sent"],
+        help=(
+            "Which emails to scan for attachments:\n"
+            "  both      — all emails (default)\n"
+            "  received  — only emails others sent to you\n"
+            "  sent      — only emails you sent"
+        ),
+    )
     return p.parse_args()
 
 
@@ -151,6 +162,8 @@ def main() -> None:
             print(f"  After       : {args.after}")
         if args.before:
             print(f"  Before      : {args.before}")
+    direction_label = {"both": "received & sent", "received": "received only", "sent": "sent only"}
+    print(f"  Emails      : {direction_label[args.direction]}")
     print(f"  Sheets log  : {'disabled' if args.no_sheets else 'enabled'}")
     print()
 
@@ -159,19 +172,20 @@ def main() -> None:
     msg_q: queue.Queue = queue.Queue()
 
     cfg = WorkerConfig(
-        output_dir    = output_dir,
-        categories    = categories,
-        after         = args.after,
-        before        = args.before,
-        creds_path    = creds_path,
-        token_path    = token_path,
-        manifest      = manifest,
-        msg_queue     = msg_q,
-        storage_mode  = "local",
-        enable_sheets = not args.no_sheets,
-        sheet_id_path = sheet_id_path,
-        scan_links    = True,
-        override_ids  = override_ids,
+        output_dir      = output_dir,
+        categories      = categories,
+        after           = args.after,
+        before          = args.before,
+        creds_path      = creds_path,
+        token_path      = token_path,
+        manifest        = manifest,
+        msg_queue       = msg_q,
+        storage_mode    = "local",
+        enable_sheets   = not args.no_sheets,
+        sheet_id_path   = sheet_id_path,
+        scan_links      = True,
+        override_ids    = override_ids,
+        email_direction = args.direction,
     )
 
     worker = ExtractionWorker(cfg)
