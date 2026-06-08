@@ -849,7 +849,15 @@ class ExtractionWorker:
         receiver_email = parse_recipients(hdrs.get("To", ""))
         subject        = hdrs.get("Subject", "(no subject)")
         email_date     = parse_email_date(hdrs.get("Date", ""))
-        sender_dir     = sanitise_dirname(sender_email or sender_name)
+
+        # Sent mode: one folder per recipient so files are findable by who received them.
+        # Received / both: one folder for the sender (existing behaviour).
+        if self.cfg.email_direction == "sent":
+            raw_receivers = [r.strip() for r in receiver_email.split(",") if r.strip()]
+            base_dirs = ([sanitise_dirname(r) for r in raw_receivers]
+                         or [sanitise_dirname(sender_email or sender_name)])
+        else:
+            base_dirs = [sanitise_dirname(sender_email or sender_name)]
 
         # ── Direct attachments ─────────────────────────────────────────────
         payload = msg.get("payload", {})
@@ -871,35 +879,44 @@ class ExtractionWorker:
             if not filename:
                 ext      = mime_type.split("/")[-1].split("+")[0]
                 filename = f"attachment_{msg_id[:8]}.{ext}"
-            safe_name    = sanitise_filename(filename)
-            manifest_key = f"{self.cfg.storage_mode}/{sender_dir}/{email_date}/{category}/{msg_id}"
+            safe_name = sanitise_filename(filename)
 
-            if not self.cfg.manifest.claim(manifest_key, safe_name):
-                if self.cfg.storage_mode == "onedrive" and self.cfg.onedrive_client:
-                    od_path = f"GmailMedia/{sender_dir}/{email_date}/{category}/{safe_name}"
-                    try:
-                        exists = self.cfg.onedrive_client.file_exists(od_path)
-                    except Exception:
-                        exists = False  # can't confirm → re-download to be safe
-                    if exists:
-                        with state_lock:
-                            state["skipped"] += 1
-                        self._emit("skipped", name=safe_name, reason="already on OneDrive")
-                        continue
-                    # File is gone from OneDrive — remove from manifest and re-download
-                    self.cfg.manifest.remove(manifest_key, safe_name)
-                    self.cfg.manifest.claim(manifest_key, safe_name)
+            # Find which base_dirs still need this attachment
+            pending_dirs: list[str] = []
+            for base_dir in base_dirs:
+                mkey = f"{self.cfg.storage_mode}/{base_dir}/{email_date}/{category}/{msg_id}"
+                if not self.cfg.manifest.claim(mkey, safe_name):
+                    if self.cfg.storage_mode == "onedrive" and self.cfg.onedrive_client:
+                        od_path = f"GmailMedia/{base_dir}/{email_date}/{category}/{safe_name}"
+                        try:
+                            exists = self.cfg.onedrive_client.file_exists(od_path)
+                        except Exception:
+                            exists = False
+                        if exists:
+                            with state_lock:
+                                state["skipped"] += 1
+                            self._emit("skipped", name=safe_name, reason="already on OneDrive")
+                            continue
+                        self.cfg.manifest.remove(mkey, safe_name)
+                        self.cfg.manifest.claim(mkey, safe_name)
+                        pending_dirs.append(base_dir)
+                    else:
+                        local_path = self.cfg.output_dir / base_dir / email_date / category / safe_name
+                        if local_path.exists():
+                            with state_lock:
+                                state["skipped"] += 1
+                            self._emit("skipped", name=safe_name, reason="already downloaded")
+                            continue
+                        self.cfg.manifest.remove(mkey, safe_name)
+                        self.cfg.manifest.claim(mkey, safe_name)
+                        pending_dirs.append(base_dir)
                 else:
-                    local_path = self.cfg.output_dir / sender_dir / email_date / category / safe_name
-                    if local_path.exists():
-                        with state_lock:
-                            state["skipped"] += 1
-                        self._emit("skipped", name=safe_name, reason="already downloaded")
-                        continue
-                    # File was deleted locally — remove from manifest and re-download
-                    self.cfg.manifest.remove(manifest_key, safe_name)
-                    self.cfg.manifest.claim(manifest_key, safe_name)
+                    pending_dirs.append(base_dir)
 
+            if not pending_dirs:
+                continue
+
+            # Fetch attachment bytes once for all pending dirs
             def _fetch_att(aid=att_id):
                 with _http_exec_lock:
                     return svc.users().messages().attachments().get(
@@ -919,32 +936,34 @@ class ExtractionWorker:
                 continue
             raw = base64.urlsafe_b64decode(att.get("data", "") + "==")
 
-            try:
-                storage_loc = self._store(
-                    raw, safe_name, sender_dir, email_date, category,
-                    sender_name, sender_email, receiver_email, subject, "Direct Attachment", sheets,
-                )
-            except RuntimeError as exc:
-                with failures_lock:
-                    failures.append({
-                        "msg_id": msg_id, "step": "store",
-                        "filename": safe_name, "reason": str(exc),
-                    })
-                self._emit("status", text=f"⚠️  {exc}")
+            # Store once per pending base_dir
+            for base_dir in pending_dirs:
+                try:
+                    storage_loc = self._store(
+                        raw, safe_name, base_dir, email_date, category,
+                        sender_name, sender_email, receiver_email, subject, "Direct Attachment", sheets,
+                    )
+                except RuntimeError as exc:
+                    with failures_lock:
+                        failures.append({
+                            "msg_id": msg_id, "step": "store",
+                            "filename": safe_name, "reason": str(exc),
+                        })
+                    self._emit("status", text=f"⚠️  {exc}")
+                    with state_lock:
+                        state["errors"] += 1
+                    continue
                 with state_lock:
-                    state["errors"] += 1
-                continue
-            with state_lock:
-                state["downloaded"] += 1
-                count = state["downloaded"]
-            with records_lock:
-                records.append({
-                    "message_id": msg_id, "sender_email": sender_email,
-                    "subject": subject, "date": email_date,
-                    "filename": safe_name, "category": category,
-                    "source": "attachment", "storage": storage_loc,
-                })
-            self._emit("file_done", name=safe_name, category=category, count=count)
+                    state["downloaded"] += 1
+                    count = state["downloaded"]
+                with records_lock:
+                    records.append({
+                        "message_id": msg_id, "sender_email": sender_email,
+                        "subject": subject, "date": email_date,
+                        "filename": safe_name, "category": category,
+                        "source": "attachment", "storage": storage_loc,
+                    })
+                self._emit("file_done", name=safe_name, category=category, count=count)
 
         # ── OneDrive links in email body ───────────────────────────────────
         if self.cfg.scan_links and REQUESTS_OK:
@@ -977,57 +996,68 @@ class ExtractionWorker:
                 if not link_cat or link_cat not in self.cfg.categories:
                     continue
 
-                safe_name    = sanitise_filename(link_filename)
-                manifest_key = f"{sender_dir}/{email_date}/{link_cat}/{msg_id}"
+                safe_name = sanitise_filename(link_filename)
 
-                if not self.cfg.manifest.claim(manifest_key, safe_name):
-                    if self.cfg.storage_mode == "onedrive" and self.cfg.onedrive_client:
-                        od_path = f"GmailMedia/{sender_dir}/{email_date}/{link_cat}/{safe_name}"
-                        try:
-                            exists = self.cfg.onedrive_client.file_exists(od_path)
-                        except Exception:
-                            exists = False  # can't confirm → re-download to be safe
-                        if exists:
-                            with state_lock:
-                                state["skipped"] += 1
-                            continue
-                        self.cfg.manifest.remove(manifest_key, safe_name)
-                        self.cfg.manifest.claim(manifest_key, safe_name)
+                # Find which base_dirs still need this link file
+                pending_dirs = []
+                for base_dir in base_dirs:
+                    mkey = f"{base_dir}/{email_date}/{link_cat}/{msg_id}"
+                    if not self.cfg.manifest.claim(mkey, safe_name):
+                        if self.cfg.storage_mode == "onedrive" and self.cfg.onedrive_client:
+                            od_path = f"GmailMedia/{base_dir}/{email_date}/{link_cat}/{safe_name}"
+                            try:
+                                exists = self.cfg.onedrive_client.file_exists(od_path)
+                            except Exception:
+                                exists = False
+                            if exists:
+                                with state_lock:
+                                    state["skipped"] += 1
+                                continue
+                            self.cfg.manifest.remove(mkey, safe_name)
+                            self.cfg.manifest.claim(mkey, safe_name)
+                            pending_dirs.append(base_dir)
+                        else:
+                            local_path = self.cfg.output_dir / base_dir / email_date / link_cat / safe_name
+                            if local_path.exists():
+                                with state_lock:
+                                    state["skipped"] += 1
+                                continue
+                            self.cfg.manifest.remove(mkey, safe_name)
+                            self.cfg.manifest.claim(mkey, safe_name)
+                            pending_dirs.append(base_dir)
                     else:
-                        local_path = self.cfg.output_dir / sender_dir / email_date / link_cat / safe_name
-                        if local_path.exists():
-                            with state_lock:
-                                state["skipped"] += 1
-                            continue
-                        self.cfg.manifest.remove(manifest_key, safe_name)
-                        self.cfg.manifest.claim(manifest_key, safe_name)
+                        pending_dirs.append(base_dir)
 
-                try:
-                    storage_loc = self._store(
-                        link_bytes, safe_name, sender_dir, email_date, link_cat,
-                        sender_name, sender_email, receiver_email, subject, "OneDrive Link", sheets,
-                    )
-                except RuntimeError as exc:
-                    with failures_lock:
-                        failures.append({
-                            "msg_id": msg_id, "step": "store_onedrive_link",
-                            "filename": safe_name, "url": link_url, "reason": str(exc),
-                        })
-                    self._emit("status", text=f"⚠️  {exc}")
-                    with state_lock:
-                        state["errors"] += 1
+                if not pending_dirs:
                     continue
-                with state_lock:
-                    state["downloaded"] += 1
-                    count = state["downloaded"]
-                with records_lock:
-                    records.append({
-                        "message_id": msg_id, "sender_email": sender_email,
-                        "subject": subject, "date": email_date,
-                        "filename": safe_name, "category": link_cat,
-                        "source": link_url, "storage": storage_loc,
-                    })
-                self._emit("file_done", name=safe_name, category=link_cat, count=count)
+
+                for base_dir in pending_dirs:
+                    try:
+                        storage_loc = self._store(
+                            link_bytes, safe_name, base_dir, email_date, link_cat,
+                            sender_name, sender_email, receiver_email, subject, "OneDrive Link", sheets,
+                        )
+                    except RuntimeError as exc:
+                        with failures_lock:
+                            failures.append({
+                                "msg_id": msg_id, "step": "store_onedrive_link",
+                                "filename": safe_name, "url": link_url, "reason": str(exc),
+                            })
+                        self._emit("status", text=f"⚠️  {exc}")
+                        with state_lock:
+                            state["errors"] += 1
+                        continue
+                    with state_lock:
+                        state["downloaded"] += 1
+                        count = state["downloaded"]
+                    with records_lock:
+                        records.append({
+                            "message_id": msg_id, "sender_email": sender_email,
+                            "subject": subject, "date": email_date,
+                            "filename": safe_name, "category": link_cat,
+                            "source": link_url, "storage": storage_loc,
+                        })
+                    self._emit("file_done", name=safe_name, category=link_cat, count=count)
 
         if sheets:
             sheets.flush()
