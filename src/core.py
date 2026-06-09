@@ -605,6 +605,24 @@ class SheetsLogger:
         ).execute()
         self._id_path.write_text(self._sheet_id, encoding="utf-8")
 
+    def log_run_start(self, categories: set[str], direction: str) -> None:
+        """Append a visual separator row marking the start of a new run."""
+        ts   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cats = ", ".join(sorted(categories))
+        dir_label = {
+            "both":     "received & sent",
+            "received": "received only",
+            "sent":     "sent only",
+        }
+        summary = (
+            f"── Run  {ts}"
+            f"  |  {dir_label.get(direction, direction)}"
+            f"  |  {cats}"
+        )
+        row = [summary] + [""] * (len(SHEET_HEADERS) - 1)
+        with self._lock:
+            self._pending.append(row)
+
     def log(
         self,
         sender_name: str,
@@ -707,6 +725,7 @@ class ExtractionWorker:
                 sheets = SheetsLogger(creds, self.cfg.sheet_id_path)
                 sheets.initialize()
                 self._emit("sheet_url", url=sheets.sheet_url)
+                sheets.log_run_start(self.cfg.categories, self.cfg.email_direction)
             except Exception as exc:
                 self._emit("status", text=f"⚠️  Sheets logging unavailable: {exc}")
 

@@ -365,22 +365,22 @@ class App(ctk.CTk):
         grid.pack(fill="x", padx=18, pady=(12, 20))
         grid.columnconfigure((0, 1), weight=1)
 
-        self._cat_vars: dict[str, ctk.BooleanVar] = {}
+        self._cat_checks: dict[str, ctk.CTkCheckBox] = {}
         for i, cat in enumerate(ALL_CATEGORIES):
-            var = ctk.BooleanVar(value=True)
-            self._cat_vars[cat] = var
             icon  = CATEGORY_ICONS.get(cat, "•")
             count = self._manifest.count_for(cat)
             label = f"  {icon}  {cat}" + (f"  ({count} saved)" if count else "")
-            ctk.CTkCheckBox(
+            cb = ctk.CTkCheckBox(
                 grid, text=label,
-                variable=var,
                 command=self._sync_all,
                 font=ctk.CTkFont(size=19),
                 text_color=C["text_dim"],
                 fg_color=C["accent"], hover_color=C["accent_h"],
                 checkmark_color="white", corner_radius=5,
-            ).grid(row=i // 2, column=i % 2, sticky="w", pady=10, padx=12)
+            )
+            cb.grid(row=i // 2, column=i % 2, sticky="w", pady=10, padx=12)
+            cb.select()
+            self._cat_checks[cat] = cb
 
     def _build_storage_section(self, parent):
         SectionHeader(parent, "WHERE TO SAVE").pack(anchor="w", padx=24, pady=(24, 10))
@@ -742,11 +742,11 @@ class App(ctk.CTk):
 
     def _toggle_all(self):
         v = self._all_var.get()
-        for var in self._cat_vars.values():
-            var.set(v)
+        for cb in self._cat_checks.values():
+            cb.select() if v else cb.deselect()
 
     def _sync_all(self):
-        self._all_var.set(all(v.get() for v in self._cat_vars.values()))
+        self._all_var.set(all(cb.get() for cb in self._cat_checks.values()))
 
     def _browse(self):
         d = filedialog.askdirectory(title="Choose save folder", initialdir=self._out_var.get())
@@ -776,7 +776,7 @@ class App(ctk.CTk):
     # ── Validation ─────────────────────────────────────────────────────────
 
     def _validate(self) -> tuple[bool, str]:
-        if not any(v.get() for v in self._cat_vars.values()):
+        if not any(cb.get() for cb in self._cat_checks.values()):
             return False, "Please select at least one file type."
         mode = self._storage_var.get()
         if mode == "local" and not self._out_var.get().strip():
@@ -809,7 +809,7 @@ class App(ctk.CTk):
         self._start_btn.configure(state="disabled")
         self._cancel_btn.configure(state="normal")
 
-        cats = {c for c, v in self._cat_vars.items() if v.get()}
+        cats = {c for c, cb in self._cat_checks.items() if cb.get()}
 
         cfg = WorkerConfig(
             output_dir       = self._output_dir,
