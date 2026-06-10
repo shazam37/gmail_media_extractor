@@ -194,6 +194,12 @@ def extract_count(data: bytes, filename: str) -> str:
 
 
 def _cnt_pdf(data: bytes) -> str:
+    # /Count in the root /Pages node equals total page count.
+    # Taking max() handles nested page-tree nodes (which have smaller counts).
+    # Falls back to counting /Type /Page objects for PDFs without a /Count entry.
+    counts = [int(m) for m in re.findall(rb"/Count\s+(\d+)", data)]
+    if counts:
+        return f"{max(counts)} page{'s' if max(counts) != 1 else ''}"
     n = len(re.findall(rb"/Type\s*/Page(?!\w)", data))
     return f"{n} page{'s' if n != 1 else ''}" if n else ""
 
