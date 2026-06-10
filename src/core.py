@@ -508,6 +508,20 @@ class OneDriveClient:
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self._token}"}
 
+    def _fetch_web_url(self, drive_path: str) -> str:
+        """GET the file's webUrl from Graph API (used when the upload response omits it)."""
+        try:
+            resp = _req_retry(lambda p=drive_path: _req.get(
+                f"{self.GRAPH}/me/drive/root:/{p}",
+                headers=self._headers(),
+                timeout=15,
+            ))
+            if resp.ok:
+                return resp.json().get("webUrl", "")
+        except Exception:
+            pass
+        return ""
+
     def upload(self, file_bytes: bytes, drive_path: str) -> str:
         """
         Upload bytes to /me/drive/root:/{drive_path}:/content.
@@ -527,7 +541,7 @@ class OneDriveClient:
                 raise RuntimeError(
                     f"OneDrive upload failed ({resp.status_code}): {drive_path}"
                 )
-            return resp.json().get("webUrl", drive_path)
+            return resp.json().get("webUrl") or self._fetch_web_url(drive_path) or drive_path
 
         # Large file: resumable upload session — restart the whole session on failure
         for _attempt in range(4):
@@ -558,7 +572,9 @@ class OneDriveClient:
                         raise RuntimeError(
                             f"OneDrive chunk upload failed ({resp.status_code}): {drive_path}"
                         )
-                return resp.json().get("webUrl", drive_path) if resp else drive_path
+                if resp:
+                    return resp.json().get("webUrl") or self._fetch_web_url(drive_path) or drive_path
+                return drive_path
             except RuntimeError:
                 if _attempt < 3:
                     time.sleep(2 ** _attempt)
@@ -591,6 +607,16 @@ class SheetsLogger:
         """Locate or create the log spreadsheet; write headers on first creation."""
         if self._id_path.exists():
             self._sheet_id = self._id_path.read_text(encoding="utf-8").strip()
+            # Always refresh row 1 so new columns (Receiver Email, File Size) appear
+            try:
+                self._svc.spreadsheets().values().update(
+                    spreadsheetId=self._sheet_id,
+                    range="Log!A1",
+                    valueInputOption="RAW",
+                    body={"values": [SHEET_HEADERS]},
+                ).execute()
+            except Exception:
+                pass
             return
         ss = self._svc.spreadsheets().create(body={
             "properties": {"title": self.SHEET_TITLE},
