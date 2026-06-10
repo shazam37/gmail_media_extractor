@@ -6,11 +6,14 @@ OneDrive link extraction, OneDrive upload, and Google Sheets logging.
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import re
+import struct
 import threading
 import time
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -165,10 +168,119 @@ def category_from_filename(filename: str) -> Optional[str]:
     return _EXT_CATEGORY.get(Path(filename).suffix.lower().lstrip("."))
 
 
+# ── File-content count extraction (stdlib only, no new deps) ──────────────
+
+def extract_count(data: bytes, filename: str) -> str:
+    """Return a human-readable count metric (pages, sheets, slides, dims…). Empty string if unknown."""
+    ext = Path(filename).suffix.lower().lstrip(".")
+    try:
+        if ext == "pdf":
+            return _cnt_pdf(data)
+        if ext in ("docx", "odt"):
+            return _cnt_word(data, ext)
+        if ext in ("xlsx", "ods"):
+            return _cnt_spreadsheet(data, ext)
+        if ext in ("pptx", "odp"):
+            return _cnt_presentation(data, ext)
+        if ext == "csv":
+            return _cnt_csv(data)
+        if ext in ("png", "jpg", "jpeg", "gif", "bmp"):
+            return _cnt_image(data, ext)
+        if ext == "zip":
+            return _cnt_zip(data)
+    except Exception:
+        pass
+    return ""
+
+
+def _cnt_pdf(data: bytes) -> str:
+    n = len(re.findall(rb"/Type\s*/Page(?!\w)", data))
+    return f"{n} page{'s' if n != 1 else ''}" if n else ""
+
+
+def _cnt_word(data: bytes, ext: str) -> str:
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        if ext == "docx":
+            xml = z.read("docProps/app.xml")
+            m = re.search(rb"<Pages>(\d+)</Pages>", xml)
+        else:  # odt
+            xml = z.read("meta.xml")
+            m = re.search(rb'meta:page-count="(\d+)"', xml)
+        if m:
+            n = int(m.group(1))
+            return f"{n} page{'s' if n != 1 else ''}"
+    return ""
+
+
+def _cnt_spreadsheet(data: bytes, ext: str) -> str:
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        if ext == "xlsx":
+            xml = z.read("xl/workbook.xml")
+            n = len(re.findall(rb"<sheet\b", xml))
+        else:  # ods
+            xml = z.read("content.xml")
+            n = len(re.findall(rb"<table:table\b", xml))
+        return f"{n} sheet{'s' if n != 1 else ''}" if n else ""
+
+
+def _cnt_presentation(data: bytes, ext: str) -> str:
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        if ext == "pptx":
+            n = sum(1 for name in z.namelist() if re.match(r"ppt/slides/slide\d+\.xml$", name))
+        else:  # odp
+            xml = z.read("content.xml")
+            n = len(re.findall(rb"<draw:page\b", xml))
+        return f"{n} slide{'s' if n != 1 else ''}" if n else ""
+
+
+def _cnt_csv(data: bytes) -> str:
+    lines = data.count(b"\n")
+    rows = max(lines - 1, 0)  # subtract header row
+    return f"{rows} row{'s' if rows != 1 else ''}" if rows else ""
+
+
+def _cnt_image(data: bytes, ext: str) -> str:
+    w = h = 0
+    if ext == "png" and data[:4] == b"\x89PNG":
+        w, h = struct.unpack(">II", data[16:24])
+    elif ext in ("jpg", "jpeg"):
+        w, h = _jpeg_wh(data)
+    elif ext == "gif" and data[:3] == b"GIF":
+        w, h = struct.unpack("<HH", data[6:10])
+        frames = len(re.findall(b"\x00!\xf9\x04", data))
+        if frames > 1:
+            return f"{frames} frames ({w}×{h} px)"
+    elif ext == "bmp" and data[:2] == b"BM":
+        w = struct.unpack("<I", data[18:22])[0]
+        h = abs(struct.unpack("<i", data[22:26])[0])
+    return f"{w}×{h} px" if w and h else ""
+
+
+def _jpeg_wh(data: bytes) -> tuple[int, int]:
+    i = 2
+    while i < len(data) - 8:
+        if data[i] != 0xFF:
+            break
+        marker = data[i + 1]
+        if marker in (0xC0, 0xC1, 0xC2):
+            h = struct.unpack(">H", data[i + 5:i + 7])[0]
+            w = struct.unpack(">H", data[i + 7:i + 9])[0]
+            return w, h
+        length = struct.unpack(">H", data[i + 2:i + 4])[0]
+        i += 2 + length
+    return 0, 0
+
+
+def _cnt_zip(data: bytes) -> str:
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        n = sum(1 for name in z.namelist() if not name.endswith("/"))
+        return f"{n} file{'s' if n != 1 else ''}" if n else ""
+
+
 # ── Sheets column headers ──────────────────────────────────────────────────
 SHEET_HEADERS = [
     "Timestamp", "Sender Name", "Sender Email", "Receiver Email", "Email Date",
-    "Email Subject", "Filename", "File Size (KB)", "Category", "Source", "Storage Location",
+    "Email Subject", "Filename", "File Size (KB)", "Count", "Category", "Source", "Storage Location",
 ]
 
 
@@ -658,6 +770,7 @@ class SheetsLogger:
         subject: str,
         filename: str,
         file_size_kb: float,
+        count: str,
         category: str,
         source: str,
         storage: str,
@@ -665,7 +778,7 @@ class SheetsLogger:
         row = [
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             sender_name, sender_email, receiver_email, email_date,
-            subject, filename, file_size_kb, category, source, storage,
+            subject, filename, file_size_kb, count, category, source, storage,
         ]
         with self._lock:
             self._pending.append(row)
@@ -1123,13 +1236,14 @@ class ExtractionWorker:
     ) -> str:
         """Save bytes to local disk or OneDrive. Returns storage location string."""
         file_size_kb = round(len(data) / 1024, 1)
+        count        = extract_count(data, filename)
 
         if self.cfg.storage_mode == "onedrive" and self.cfg.onedrive_client:
             drive_path = f"GmailMedia/{sender_dir}/{email_date}/{category}/{filename}"
             web_url    = self.cfg.onedrive_client.upload(data, drive_path)
             if sheets:
                 sheets.log(sender_name, sender_email, receiver_email, email_date,
-                           subject, filename, file_size_kb, category, source, web_url)
+                           subject, filename, file_size_kb, count, category, source, web_url)
             return web_url
 
         target_dir = self.cfg.output_dir / sender_dir / email_date / category
@@ -1138,7 +1252,7 @@ class ExtractionWorker:
         out_path.write_bytes(data)
         if sheets:
             sheets.log(sender_name, sender_email, receiver_email, email_date,
-                       subject, filename, file_size_kb, category, source, str(out_path))
+                       subject, filename, file_size_kb, count, category, source, str(out_path))
         return str(out_path)
 
     def _authenticate(self) -> "Credentials":
