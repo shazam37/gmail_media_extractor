@@ -23,7 +23,7 @@ jobs:
 
     defaults:
       run:
-        working-directory: files
+        working-directory: src
 
     steps:
       - name: Checkout repository
@@ -74,5 +74,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: files/GmailMediaExtractor
-          if-no-files-found: error
+          path: src/GmailMediaExtractor
+          if-no-src-found: error
