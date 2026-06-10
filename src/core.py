@@ -50,6 +50,31 @@ try:
 except ImportError:
     MSAL_OK = False
 
+# ── Optional enrichment libs ───────────────────────────────────────────────
+try:
+    import pypdf as _pypdf
+    PYPDF_OK = True
+except ImportError:
+    PYPDF_OK = False
+
+try:
+    import mutagen as _mutagen
+    MUTAGEN_OK = True
+except ImportError:
+    MUTAGEN_OK = False
+
+try:
+    import olefile as _olefile
+    OLEFILE_OK = True
+except ImportError:
+    OLEFILE_OK = False
+
+try:
+    from PIL import Image as _PILImage
+    PIL_OK = True
+except ImportError:
+    PIL_OK = False
+
 # ── Retry helpers ──────────────────────────────────────────────────────────
 
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
@@ -168,24 +193,35 @@ def category_from_filename(filename: str) -> Optional[str]:
     return _EXT_CATEGORY.get(Path(filename).suffix.lower().lstrip("."))
 
 
-# ── File-content count extraction (stdlib only, no new deps) ──────────────
+# ── File-content count extraction ─────────────────────────────────────────
 
 def extract_count(data: bytes, filename: str) -> str:
-    """Return a human-readable count metric (pages, sheets, slides, dims…). Empty string if unknown."""
+    """Return a human-readable count metric (pages, sheets, slides, duration, dims…). Empty if unknown."""
     ext = Path(filename).suffix.lower().lstrip(".")
     try:
         if ext == "pdf":
             return _cnt_pdf(data)
         if ext in ("docx", "odt"):
-            return _cnt_word(data, ext)
+            return _cnt_word_xml(data, ext)
+        if ext == "doc":
+            return _cnt_ole(data, "doc")
         if ext in ("xlsx", "ods"):
-            return _cnt_spreadsheet(data, ext)
+            return _cnt_spreadsheet_xml(data, ext)
+        if ext == "xls":
+            return _cnt_ole(data, "xls")
         if ext in ("pptx", "odp"):
-            return _cnt_presentation(data, ext)
+            return _cnt_presentation_xml(data, ext)
+        if ext == "ppt":
+            return _cnt_ole(data, "ppt")
         if ext == "csv":
             return _cnt_csv(data)
-        if ext in ("png", "jpg", "jpeg", "gif", "bmp"):
+        if ext in ("png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif",
+                   "webp", "heic", "heif", "svg"):
             return _cnt_image(data, ext)
+        if ext in ("mp3", "flac", "wav", "ogg", "opus", "aiff", "aif",
+                   "wma", "aac", "m4a", "mp4", "mov", "m4v",
+                   "mkv", "webm", "wmv", "avi", "mpeg", "mpg"):
+            return _cnt_media(data, ext)
         if ext == "zip":
             return _cnt_zip(data)
     except Exception:
@@ -193,18 +229,25 @@ def extract_count(data: bytes, filename: str) -> str:
     return ""
 
 
+# ── PDF ────────────────────────────────────────────────────────────────────
+
 def _cnt_pdf(data: bytes) -> str:
-    # /Count in the root /Pages node equals total page count.
-    # Taking max() handles nested page-tree nodes (which have smaller counts).
-    # Falls back to counting /Type /Page objects for PDFs without a /Count entry.
+    if PYPDF_OK:
+        reader = _pypdf.PdfReader(io.BytesIO(data), strict=False)
+        n = len(reader.pages)
+        return f"{n} page{'s' if n != 1 else ''}" if n else ""
+    # Fallback: /Count in the page tree (most reliable regex approach)
     counts = [int(m) for m in re.findall(rb"/Count\s+(\d+)", data)]
     if counts:
-        return f"{max(counts)} page{'s' if max(counts) != 1 else ''}"
+        n = max(counts)
+        return f"{n} page{'s' if n != 1 else ''}"
     n = len(re.findall(rb"/Type\s*/Page(?!\w)", data))
     return f"{n} page{'s' if n != 1 else ''}" if n else ""
 
 
-def _cnt_word(data: bytes, ext: str) -> str:
+# ── Modern XML Office formats (stdlib zipfile) ─────────────────────────────
+
+def _cnt_word_xml(data: bytes, ext: str) -> str:
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         if ext == "docx":
             xml = z.read("docProps/app.xml")
@@ -218,7 +261,7 @@ def _cnt_word(data: bytes, ext: str) -> str:
     return ""
 
 
-def _cnt_spreadsheet(data: bytes, ext: str) -> str:
+def _cnt_spreadsheet_xml(data: bytes, ext: str) -> str:
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         if ext == "xlsx":
             xml = z.read("xl/workbook.xml")
@@ -229,23 +272,76 @@ def _cnt_spreadsheet(data: bytes, ext: str) -> str:
         return f"{n} sheet{'s' if n != 1 else ''}" if n else ""
 
 
-def _cnt_presentation(data: bytes, ext: str) -> str:
+def _cnt_presentation_xml(data: bytes, ext: str) -> str:
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         if ext == "pptx":
-            n = sum(1 for name in z.namelist() if re.match(r"ppt/slides/slide\d+\.xml$", name))
+            n = sum(1 for name in z.namelist()
+                    if re.match(r"ppt/slides/slide\d+\.xml$", name))
         else:  # odp
             xml = z.read("content.xml")
             n = len(re.findall(rb"<draw:page\b", xml))
         return f"{n} slide{'s' if n != 1 else ''}" if n else ""
 
 
+# ── Legacy binary Office formats (olefile) ────────────────────────────────
+
+def _cnt_ole(data: bytes, ext: str) -> str:
+    if not OLEFILE_OK:
+        return ""
+    with _olefile.OleFileIO(io.BytesIO(data)) as ole:
+        if ext == "doc":
+            meta = ole.get_metadata()
+            if meta.num_pages:
+                n = meta.num_pages
+                return f"{n} page{'s' if n != 1 else ''}"
+        elif ext == "xls":
+            stream = ("Workbook" if ole.exists("Workbook")
+                      else "Book" if ole.exists("Book") else None)
+            if stream:
+                n = _biff_sheet_count(ole.openstream(stream).read())
+                return f"{n} sheet{'s' if n != 1 else ''}" if n else ""
+        elif ext == "ppt":
+            meta = ole.get_metadata()
+            # SummaryInformation num_pages = slide count for PPT
+            if meta.num_pages:
+                n = meta.num_pages
+                return f"{n} slide{'s' if n != 1 else ''}"
+    return ""
+
+
+def _biff_sheet_count(data: bytes) -> int:
+    """Count BoundSheet8 records (type 0x0085) in a BIFF8 Workbook stream."""
+    n = i = 0
+    while i + 4 <= len(data):
+        rec_type = struct.unpack_from("<H", data, i)[0]
+        rec_len  = struct.unpack_from("<H", data, i + 2)[0]
+        if rec_type == 0x0085:
+            n += 1
+        i += 4 + rec_len
+        if rec_len == 0 and rec_type == 0:
+            break
+    return n
+
+
+# ── CSV ────────────────────────────────────────────────────────────────────
+
 def _cnt_csv(data: bytes) -> str:
     lines = data.count(b"\n")
-    rows = max(lines - 1, 0)  # subtract header row
+    rows = max(lines - 1, 0)
     return f"{rows} row{'s' if rows != 1 else ''}" if rows else ""
 
 
+# ── Images (Pillow primary, manual fallback) ───────────────────────────────
+
 def _cnt_image(data: bytes, ext: str) -> str:
+    if PIL_OK:
+        with _PILImage.open(io.BytesIO(data)) as img:
+            w, h = img.size
+            n_frames = getattr(img, "n_frames", 1)
+            if n_frames > 1:
+                return f"{n_frames} frames ({w}×{h} px)"
+            return f"{w}×{h} px"
+    # Manual fallback for PNG / JPEG / GIF / BMP
     w = h = 0
     if ext == "png" and data[:4] == b"\x89PNG":
         w, h = struct.unpack(">II", data[16:24])
@@ -276,6 +372,44 @@ def _jpeg_wh(data: bytes) -> tuple[int, int]:
         i += 2 + length
     return 0, 0
 
+
+# ── Audio / Video (mutagen primary, manual AVI fallback) ──────────────────
+
+def _cnt_media(data: bytes, ext: str) -> str:
+    if MUTAGEN_OK:
+        f = _mutagen.File(io.BytesIO(data))
+        if f is not None and hasattr(f, "info") and hasattr(f.info, "length"):
+            return _fmt_duration(f.info.length)
+    # mutagen doesn't support AVI — parse the RIFF header directly
+    if ext == "avi":
+        return _cnt_avi(data)
+    return ""
+
+
+def _fmt_duration(seconds: float) -> str:
+    s = int(seconds)
+    if s < 3600:
+        return f"{s // 60}:{s % 60:02d} min"
+    return f"{s // 3600}:{(s % 3600) // 60:02d}:{s % 60:02d} h"
+
+
+def _cnt_avi(data: bytes) -> str:
+    if len(data) < 56 or data[:4] != b"RIFF" or data[8:12] != b"AVI ":
+        return ""
+    idx = data.find(b"avih")
+    if idx < 0 or idx + 28 > len(data):
+        return ""
+    avih = data[idx + 8:]
+    if len(avih) < 20:
+        return ""
+    usec_per_frame = struct.unpack_from("<I", avih, 0)[0]
+    total_frames   = struct.unpack_from("<I", avih, 16)[0]
+    if usec_per_frame > 0 and total_frames > 0:
+        return _fmt_duration(total_frames * usec_per_frame / 1_000_000)
+    return ""
+
+
+# ── Archives ───────────────────────────────────────────────────────────────
 
 def _cnt_zip(data: bytes) -> str:
     with zipfile.ZipFile(io.BytesIO(data)) as z:

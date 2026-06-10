@@ -4,3 +4,6 @@ google-auth-httplib2>=0.2.0
 google-api-python-client>=2.120.0
 msal>=1.28.0
 requests>=2.31.0
+pypdf>=4.0.0
+mutagen>=1.47.0
+olefile>=0.47
