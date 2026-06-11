@@ -59,9 +59,30 @@ except ImportError:
 
 try:
     import mutagen as _mutagen
+    import mutagen.mp3, mutagen.flac, mutagen.mp4
+    import mutagen.wave, mutagen.aiff, mutagen.oggvorbis
+    import mutagen.oggopus, mutagen.asf, mutagen.aac
     MUTAGEN_OK = True
 except ImportError:
     MUTAGEN_OK = False
+
+# extension → (mutagen submodule attr on _mutagen, class name)
+_MUTAGEN_EXT: dict[str, tuple[str, str]] = {
+    "mp3":  ("mp3",       "MP3"),
+    "flac": ("flac",      "FLAC"),
+    "wav":  ("wave",      "WAVE"),
+    "ogg":  ("oggvorbis", "OggVorbis"),
+    "opus": ("oggopus",   "OggOpus"),
+    "aiff": ("aiff",      "AIFF"),
+    "aif":  ("aiff",      "AIFF"),
+    "wma":  ("asf",       "ASF"),
+    "wmv":  ("asf",       "ASF"),
+    "mp4":  ("mp4",       "MP4"),
+    "m4a":  ("mp4",       "MP4"),
+    "m4v":  ("mp4",       "MP4"),
+    "mov":  ("mp4",       "MP4"),
+    "aac":  ("aac",       "AAC"),
+}
 
 try:
     import olefile as _olefile
@@ -377,10 +398,27 @@ def _jpeg_wh(data: bytes) -> tuple[int, int]:
 
 def _cnt_media(data: bytes, ext: str) -> str:
     if MUTAGEN_OK:
-        f = _mutagen.File(io.BytesIO(data))
-        if f is not None and hasattr(f, "info") and hasattr(f.info, "length"):
-            return _fmt_duration(f.info.length)
-    # mutagen doesn't support AVI — parse the RIFF header directly
+        # Use the extension-specific class so format detection is guaranteed.
+        # mutagen.File(BytesIO) probes magic bytes but fails for AAC, WMA, M4A, MOV
+        # and other formats that need the extension to pick the right parser.
+        if ext in _MUTAGEN_EXT:
+            mod_attr, cls_name = _MUTAGEN_EXT[ext]
+            try:
+                f = getattr(getattr(_mutagen, mod_attr), cls_name)(
+                    fileobj=io.BytesIO(data)
+                )
+                if hasattr(f, "info") and hasattr(f.info, "length"):
+                    return _fmt_duration(f.info.length)
+            except Exception:
+                pass
+        # Generic probe for any format mutagen can auto-detect
+        try:
+            f = _mutagen.File(io.BytesIO(data))
+            if f is not None and hasattr(f, "info") and hasattr(f.info, "length"):
+                return _fmt_duration(f.info.length)
+        except Exception:
+            pass
+    # AVI: mutagen has no support — parse the RIFF header directly
     if ext == "avi":
         return _cnt_avi(data)
     return ""
@@ -856,10 +894,23 @@ class SheetsLogger:
         return ""
 
     def initialize(self):
-        """Locate or create the log spreadsheet; write headers on first creation."""
+        """Locate or create the log spreadsheet; migrate schema if columns changed."""
         if self._id_path.exists():
             self._sheet_id = self._id_path.read_text(encoding="utf-8").strip()
-            # Always refresh row 1 so new columns (Receiver Email, File Size) appear
+            try:
+                # Read the actual header row that is currently in the sheet
+                result = self._svc.spreadsheets().values().get(
+                    spreadsheetId=self._sheet_id,
+                    range="Log!1:1",
+                ).execute()
+                current = (result.get("values") or [[]])[0]
+                if current != SHEET_HEADERS:
+                    # Insert blank columns for any headers that are new,
+                    # which re-aligns all existing data rows with the new schema
+                    self._migrate_columns(current)
+            except Exception:
+                pass
+            # Always write the full header row (names the newly inserted blank columns)
             try:
                 self._svc.spreadsheets().values().update(
                     spreadsheetId=self._sheet_id,
@@ -882,6 +933,50 @@ class SheetsLogger:
             body={"values": [SHEET_HEADERS]},
         ).execute()
         self._id_path.write_text(self._sheet_id, encoding="utf-8")
+
+    def _migrate_columns(self, old_headers: list[str]) -> None:
+        """Insert blank columns at the positions of any new headers in SHEET_HEADERS.
+
+        Inserts left→right so each subsequent position index stays correct after
+        prior insertions shift everything right by one.
+        """
+        missing_positions = [
+            i for i, col in enumerate(SHEET_HEADERS)
+            if col not in old_headers
+        ]
+        if not missing_positions:
+            return
+
+        # Resolve the numeric sheetId for the 'Log' tab (needed by batchUpdate)
+        info = self._svc.spreadsheets().get(spreadsheetId=self._sheet_id).execute()
+        try:
+            sheet_gid = next(
+                s["properties"]["sheetId"]
+                for s in info["sheets"]
+                if s["properties"]["title"] == "Log"
+            )
+        except StopIteration:
+            return
+
+        requests = [
+            {
+                "insertDimension": {
+                    "range": {
+                        "sheetId": sheet_gid,
+                        "dimension": "COLUMNS",
+                        "startIndex": pos,
+                        "endIndex": pos + 1,
+                    },
+                    "inheritFromBefore": False,
+                }
+            }
+            for pos in missing_positions
+        ]
+        with _http_exec_lock:
+            self._svc.spreadsheets().batchUpdate(
+                spreadsheetId=self._sheet_id,
+                body={"requests": requests},
+            ).execute()
 
     def log_run_start(self, categories: set[str], direction: str) -> None:
         """Append a visual separator row marking the start of a new run."""
@@ -941,7 +1036,9 @@ class SheetsLogger:
         try:
             _gapi_retry(_do)
         except Exception:
-            pass  # Sheets errors must not abort extraction
+            # Put rows back so they are retried on the next flush call
+            with self._lock:
+                self._pending = rows + self._pending
 
 
 # ── Worker config & engine ─────────────────────────────────────────────────
