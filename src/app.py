@@ -463,13 +463,52 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(
             self._od_panel,
-            text="Your files will be saved to your OneDrive, organised by sender and date.",
+            text="Your files will be saved to your OneDrive (folder structure set by the option below).",
             font=ctk.CTkFont(size=16), text_color=C["muted"],
         ).pack(anchor="w", pady=(8, 8))
 
         # Try silent MS auth on startup if cached token exists
         if MS_TOKEN_CACHE.exists() and MSAL_OK and ONEDRIVE_CONFIGURED:
             threading.Thread(target=self._ms_silent_auth, daemon=True).start()
+
+        # ── Folder organisation ───────────────────────────────────────────────
+        ctk.CTkFrame(card, height=1, fg_color=C["border"]).pack(fill="x", padx=20)
+
+        org_row = ctk.CTkFrame(card, fg_color="transparent")
+        org_row.pack(fill="x", padx=20, pady=(12, 4))
+
+        ctk.CTkLabel(
+            org_row, text="📁  Organize files by:",
+            font=ctk.CTkFont(size=19), text_color=C["text_dim"],
+        ).pack(side="left", padx=(0, 16))
+
+        self._sort_var = ctk.StringVar(value="Sender")
+        ctk.CTkOptionMenu(
+            org_row,
+            variable=self._sort_var,
+            values=["Sender", "Domain"],
+            width=200,
+            fg_color=C["surface2"],
+            button_color=C["border"],
+            button_hover_color=C["accent"],
+            dropdown_fg_color=C["surface"],
+            dropdown_hover_color=C["accent_dim"],
+            text_color=C["text"],
+            font=ctk.CTkFont(size=19),
+            dropdown_font=ctk.CTkFont(size=18),
+            corner_radius=8,
+            height=54,
+        ).pack(side="left")
+
+        ctk.CTkLabel(
+            card,
+            text=(
+                "Sender: one folder per sender address, sub-folders by date and type  ·  "
+                "Domain: one folder per email domain (@gmail.com, @yahoo.com…), sub-folders by type only"
+            ),
+            font=ctk.CTkFont(size=16), text_color=C["muted"],
+            wraplength=760, justify="left",
+        ).pack(anchor="w", padx=20, pady=(0, 14))
 
     def _build_options_section(self, parent):
         SectionHeader(parent, "EXTRA FEATURES").pack(anchor="w", padx=24, pady=(24, 10))
@@ -826,6 +865,7 @@ class App(ctk.CTk):
             sheet_id_path    = SHEET_ID_PATH if self._sheets_var.get() else None,
             scan_links       = self._scan_links_var.get(),
             email_direction  = self._direction_var.get(),
+            sort_by_domain   = self._sort_var.get() == "Domain",
         )
         self._worker = ExtractionWorker(cfg)
         self._thread = threading.Thread(target=self._worker.run, daemon=True)
@@ -892,7 +932,10 @@ class App(ctk.CTk):
                         + (f"·  {er} errors" if er else "")
                     )
                     if msg.get("storage_mode") == "onedrive":
-                        saved_line = "\nFiles saved to your Microsoft OneDrive\n(organised by sender → date → file type)"
+                        if self._sort_var.get() == "Domain":
+                            saved_line = "\nFiles saved to your Microsoft OneDrive\n(organised by domain → file type)"
+                        else:
+                            saved_line = "\nFiles saved to your Microsoft OneDrive\n(organised by sender → date → file type)"
                     else:
                         saved_line = f"\nSaved to:\n{msg['output_dir']}"
                     extra = ""

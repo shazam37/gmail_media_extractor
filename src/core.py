@@ -1060,6 +1060,7 @@ class WorkerConfig:
     scan_links:      bool = True    # scan email body for OneDrive links
     override_ids:    Optional[list] = None  # if set, skip _list_ids and process these msg IDs only
     email_direction: str = "both"   # "both" | "received" | "sent"
+    sort_by_domain:  bool = False   # group by email domain instead of sender address
 
 
 class ExtractionWorker:
@@ -1245,9 +1246,21 @@ class ExtractionWorker:
         subject        = hdrs.get("Subject", "(no subject)")
         email_date     = parse_email_date(hdrs.get("Date", ""))
 
-        # Sent mode: one folder per recipient so files are findable by who received them.
-        # Received / both: one folder for the sender (existing behaviour).
-        if self.cfg.email_direction == "sent":
+        # Compute base_dirs: the top-level folder name(s) for this email.
+        # Domain mode  → one folder per unique email domain (@xyz.com).
+        # Sender mode  → one folder per sender address (received/both) or recipient (sent).
+        if self.cfg.sort_by_domain:
+            if self.cfg.email_direction == "sent":
+                raw_receivers = [r.strip() for r in receiver_email.split(",") if r.strip()]
+                domains = list(dict.fromkeys(
+                    r.split("@")[-1] if "@" in r else "unknown"
+                    for r in raw_receivers
+                ))
+                base_dirs = [sanitise_dirname(f"@{d}") for d in (domains or ["unknown"])]
+            else:
+                domain = sender_email.split("@")[-1] if "@" in sender_email else "unknown"
+                base_dirs = [sanitise_dirname(f"@{domain}")]
+        elif self.cfg.email_direction == "sent":
             raw_receivers = [r.strip() for r in receiver_email.split(",") if r.strip()]
             base_dirs = ([sanitise_dirname(r) for r in raw_receivers]
                          or [sanitise_dirname(sender_email or sender_name)])
@@ -1278,11 +1291,20 @@ class ExtractionWorker:
 
             # Find which base_dirs still need this attachment
             pending_dirs: list[str] = []
+            _multi_cat = len(self.cfg.categories) > 1
             for base_dir in base_dirs:
-                mkey = f"{self.cfg.storage_mode}/{base_dir}/{email_date}/{category}/{msg_id}"
+                if self.cfg.sort_by_domain:
+                    mkey       = f"{self.cfg.storage_mode}/{base_dir}/{category}/{msg_id}"
+                    od_path    = (f"GmailMedia/{base_dir}/{category}/{safe_name}"
+                                  if _multi_cat else f"GmailMedia/{base_dir}/{safe_name}")
+                    local_path = (self.cfg.output_dir / base_dir / category / safe_name
+                                  if _multi_cat else self.cfg.output_dir / base_dir / safe_name)
+                else:
+                    mkey       = f"{self.cfg.storage_mode}/{base_dir}/{email_date}/{category}/{msg_id}"
+                    od_path    = f"GmailMedia/{base_dir}/{email_date}/{category}/{safe_name}"
+                    local_path = self.cfg.output_dir / base_dir / email_date / category / safe_name
                 if not self.cfg.manifest.claim(mkey, safe_name):
                     if self.cfg.storage_mode == "onedrive" and self.cfg.onedrive_client:
-                        od_path = f"GmailMedia/{base_dir}/{email_date}/{category}/{safe_name}"
                         try:
                             exists = self.cfg.onedrive_client.file_exists(od_path)
                         except Exception:
@@ -1296,7 +1318,6 @@ class ExtractionWorker:
                         self.cfg.manifest.claim(mkey, safe_name)
                         pending_dirs.append(base_dir)
                     else:
-                        local_path = self.cfg.output_dir / base_dir / email_date / category / safe_name
                         if local_path.exists():
                             with state_lock:
                                 state["skipped"] += 1
@@ -1395,11 +1416,20 @@ class ExtractionWorker:
 
                 # Find which base_dirs still need this link file
                 pending_dirs = []
+                _multi_cat = len(self.cfg.categories) > 1
                 for base_dir in base_dirs:
-                    mkey = f"{base_dir}/{email_date}/{link_cat}/{msg_id}"
+                    if self.cfg.sort_by_domain:
+                        mkey       = f"{base_dir}/{link_cat}/{msg_id}"
+                        od_path    = (f"GmailMedia/{base_dir}/{link_cat}/{safe_name}"
+                                      if _multi_cat else f"GmailMedia/{base_dir}/{safe_name}")
+                        local_path = (self.cfg.output_dir / base_dir / link_cat / safe_name
+                                      if _multi_cat else self.cfg.output_dir / base_dir / safe_name)
+                    else:
+                        mkey       = f"{base_dir}/{email_date}/{link_cat}/{msg_id}"
+                        od_path    = f"GmailMedia/{base_dir}/{email_date}/{link_cat}/{safe_name}"
+                        local_path = self.cfg.output_dir / base_dir / email_date / link_cat / safe_name
                     if not self.cfg.manifest.claim(mkey, safe_name):
                         if self.cfg.storage_mode == "onedrive" and self.cfg.onedrive_client:
-                            od_path = f"GmailMedia/{base_dir}/{email_date}/{link_cat}/{safe_name}"
                             try:
                                 exists = self.cfg.onedrive_client.file_exists(od_path)
                             except Exception:
@@ -1412,7 +1442,6 @@ class ExtractionWorker:
                             self.cfg.manifest.claim(mkey, safe_name)
                             pending_dirs.append(base_dir)
                         else:
-                            local_path = self.cfg.output_dir / base_dir / email_date / link_cat / safe_name
                             if local_path.exists():
                                 with state_lock:
                                     state["skipped"] += 1
@@ -1474,16 +1503,25 @@ class ExtractionWorker:
         """Save bytes to local disk or OneDrive. Returns storage location string."""
         file_size_kb = round(len(data) / 1024, 1)
         count        = extract_count(data, filename)
+        _multi_cat   = len(self.cfg.categories) > 1
 
         if self.cfg.storage_mode == "onedrive" and self.cfg.onedrive_client:
-            drive_path = f"GmailMedia/{sender_dir}/{email_date}/{category}/{filename}"
-            web_url    = self.cfg.onedrive_client.upload(data, drive_path)
+            if self.cfg.sort_by_domain:
+                drive_path = (f"GmailMedia/{sender_dir}/{category}/{filename}"
+                              if _multi_cat else f"GmailMedia/{sender_dir}/{filename}")
+            else:
+                drive_path = f"GmailMedia/{sender_dir}/{email_date}/{category}/{filename}"
+            web_url = self.cfg.onedrive_client.upload(data, drive_path)
             if sheets:
                 sheets.log(sender_name, sender_email, receiver_email, email_date,
                            subject, filename, file_size_kb, count, category, source, web_url)
             return web_url
 
-        target_dir = self.cfg.output_dir / sender_dir / email_date / category
+        if self.cfg.sort_by_domain:
+            target_dir = (self.cfg.output_dir / sender_dir / category
+                          if _multi_cat else self.cfg.output_dir / sender_dir)
+        else:
+            target_dir = self.cfg.output_dir / sender_dir / email_date / category
         target_dir.mkdir(parents=True, exist_ok=True)
         out_path = unique_path(target_dir, filename)
         out_path.write_bytes(data)

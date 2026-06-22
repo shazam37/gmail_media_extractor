@@ -91,6 +91,14 @@ def parse_args() -> argparse.Namespace:
             "  sent      — only emails you sent"
         ),
     )
+    p.add_argument(
+        "--sort-by-domain",
+        action="store_true",
+        help=(
+            "Organise folders by email domain instead of sender address.\n"
+            "Structure: @domain.com/Category/file  (or @domain.com/file when only one type selected)"
+        ),
+    )
     return p.parse_args()
 
 
@@ -164,6 +172,7 @@ def main() -> None:
             print(f"  Before      : {args.before}")
     direction_label = {"both": "received & sent", "received": "received only", "sent": "sent only"}
     print(f"  Emails      : {direction_label[args.direction]}")
+    print(f"  Sort mode   : {'domain (@domain.com folders)' if args.sort_by_domain else 'sender (per-address folders)'}")
     print(f"  Sheets log  : {'disabled' if args.no_sheets else 'enabled'}")
     print()
 
@@ -186,6 +195,7 @@ def main() -> None:
         scan_links      = True,
         override_ids    = override_ids,
         email_direction = args.direction,
+        sort_by_domain  = args.sort_by_domain,
     )
 
     worker = ExtractionWorker(cfg)
