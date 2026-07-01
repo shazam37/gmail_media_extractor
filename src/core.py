@@ -1061,7 +1061,7 @@ class WorkerConfig:
     override_ids:    Optional[list] = None  # if set, skip _list_ids and process these msg IDs only
     email_direction: str = "both"   # "both" | "received" | "sent"
     sort_by_domain:  bool = False   # group by email domain instead of sender address
-    additional_email: str = ""      # if non-empty, also include emails from/to this address
+    additional_email: str = ""      # comma-separated emails; also include emails from/to these addresses
 
 
 class ExtractionWorker:
@@ -1115,20 +1115,30 @@ class ExtractionWorker:
         if self.cfg.before:
             qparts.append(f"before:{self.cfg.before}")
 
-        # Build direction filter with optional additional email
+        # Build direction filter with optional additional emails (comma-separated)
         if self.cfg.additional_email.strip():
-            additional = self.cfg.additional_email.strip()
-            if self.cfg.email_direction == "received":
-                # received only + from specific email: (-in:sent OR from:additional)
-                qparts.append(f"(-in:sent OR from:{additional})")
-            elif self.cfg.email_direction == "sent":
-                # sent only + to specific email: (in:sent OR to:additional)
-                qparts.append(f"(in:sent OR to:{additional})")
+            additional_list = [e.strip() for e in self.cfg.additional_email.split(",") if e.strip()]
+            if additional_list:
+                if self.cfg.email_direction == "received":
+                    # received only + from specific emails: (-in:sent OR from:email1 OR from:email2 ...)
+                    from_clauses = " OR ".join(f"from:{e}" for e in additional_list)
+                    qparts.append(f"(-in:sent OR {from_clauses})")
+                elif self.cfg.email_direction == "sent":
+                    # sent only + to specific emails: (in:sent OR to:email1 OR to:email2 ...)
+                    to_clauses = " OR ".join(f"to:{e}" for e in additional_list)
+                    qparts.append(f"(in:sent OR {to_clauses})")
+                else:
+                    # both + specific emails: (from:email1 OR to:email1 OR from:email2 OR to:email2 ...)
+                    email_clauses = " OR ".join(f"(from:{e} OR to:{e})" for e in additional_list)
+                    qparts.append(f"({email_clauses})")
             else:
-                # both + specific email: no filter needed (already includes all), but we can add explicit OR for clarity
-                qparts.append(f"(from:{additional} OR to:{additional})")
+                # Empty after parsing — standard direction filter
+                if self.cfg.email_direction == "received":
+                    qparts.append("-in:sent")
+                elif self.cfg.email_direction == "sent":
+                    qparts.append("in:sent")
         else:
-            # No additional email — standard direction filter
+            # No additional emails — standard direction filter
             if self.cfg.email_direction == "received":
                 qparts.append("-in:sent")
             elif self.cfg.email_direction == "sent":

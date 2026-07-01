@@ -102,10 +102,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--additional-email",
         default="",
-        metavar="EMAIL",
+        metavar="EMAILS",
         help=(
-            "Include attachments from/to this specific email address in addition to the --direction filter.\n"
-            "Example: --direction sent --additional-email bob@example.com includes all sent emails + all emails from/to bob."
+            "Include attachments from/to specific email addresses (comma-separated) in addition to the --direction filter.\n"
+            "Example: --direction sent --additional-email bob@example.com,alice@company.com\n"
+            "This includes all sent emails + all emails from/to bob + all emails from/to alice."
         ),
     )
     return p.parse_args()
@@ -182,7 +183,11 @@ def main() -> None:
     direction_label = {"both": "received & sent", "received": "received only", "sent": "sent only"}
     emails_note = direction_label[args.direction]
     if args.additional_email:
-        emails_note += f" + {args.additional_email}"
+        additional_list = [e.strip() for e in args.additional_email.split(",") if e.strip()]
+        if len(additional_list) == 1:
+            emails_note += f" + {additional_list[0]}"
+        elif len(additional_list) > 1:
+            emails_note += f" + {len(additional_list)} specific addresses"
     print(f"  Emails      : {emails_note}")
     print(f"  Sort mode   : {'domain (@domain.com folders)' if args.sort_by_domain else 'sender (per-address folders)'}")
     print(f"  Sheets log  : {'disabled' if args.no_sheets else 'enabled'}")

@@ -344,7 +344,7 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(
             inner,
-            text="Also include a specific email address (optional):",
+            text="Also include specific email addresses (optional):",
             font=ctk.CTkFont(size=18), text_color=C["text_dim"],
         ).pack(anchor="w", pady=(0, 8))
 
@@ -352,7 +352,7 @@ class App(ctk.CTk):
         ctk.CTkEntry(
             inner,
             textvariable=self._additional_email_var,
-            placeholder_text="example@domain.com",
+            placeholder_text="alice@example.com, bob@company.com",
             height=50,
             font=ctk.CTkFont(size=18),
             fg_color=C["surface2"],
@@ -363,7 +363,7 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(
             inner,
-            text="When specified, this email's attachments will be included regardless of the option above.",
+            text="Comma-separated. Attachments from/to these emails will be included regardless of the option above.",
             font=ctk.CTkFont(size=16), text_color=C["muted"],
             wraplength=750, justify="left",
         ).pack(anchor="w")
