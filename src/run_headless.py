@@ -99,6 +99,15 @@ def parse_args() -> argparse.Namespace:
             "Structure: @domain.com/Category/file  (or @domain.com/file when only one type selected)"
         ),
     )
+    p.add_argument(
+        "--additional-email",
+        default="",
+        metavar="EMAIL",
+        help=(
+            "Include attachments from/to this specific email address in addition to the --direction filter.\n"
+            "Example: --direction sent --additional-email bob@example.com includes all sent emails + all emails from/to bob."
+        ),
+    )
     return p.parse_args()
 
 
@@ -171,7 +180,10 @@ def main() -> None:
         if args.before:
             print(f"  Before      : {args.before}")
     direction_label = {"both": "received & sent", "received": "received only", "sent": "sent only"}
-    print(f"  Emails      : {direction_label[args.direction]}")
+    emails_note = direction_label[args.direction]
+    if args.additional_email:
+        emails_note += f" + {args.additional_email}"
+    print(f"  Emails      : {emails_note}")
     print(f"  Sort mode   : {'domain (@domain.com folders)' if args.sort_by_domain else 'sender (per-address folders)'}")
     print(f"  Sheets log  : {'disabled' if args.no_sheets else 'enabled'}")
     print()
@@ -196,6 +208,7 @@ def main() -> None:
         override_ids    = override_ids,
         email_direction = args.direction,
         sort_by_domain  = args.sort_by_domain,
+        additional_email = args.additional_email,
     )
 
     worker = ExtractionWorker(cfg)

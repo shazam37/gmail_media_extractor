@@ -339,6 +339,35 @@ class App(ctk.CTk):
             font=ctk.CTkFont(size=16), text_color=C["muted"],
         ).pack(anchor="w", pady=(12, 0))
 
+        # Additional email field
+        ctk.CTkFrame(inner, height=1, fg_color=C["border"]).pack(fill="x", pady=(14, 14))
+
+        ctk.CTkLabel(
+            inner,
+            text="Also include a specific email address (optional):",
+            font=ctk.CTkFont(size=18), text_color=C["text_dim"],
+        ).pack(anchor="w", pady=(0, 8))
+
+        self._additional_email_var = ctk.StringVar(value="")
+        ctk.CTkEntry(
+            inner,
+            textvariable=self._additional_email_var,
+            placeholder_text="example@domain.com",
+            height=50,
+            font=ctk.CTkFont(size=18),
+            fg_color=C["surface2"],
+            border_color=C["border"],
+            text_color=C["text"],
+            corner_radius=8,
+        ).pack(fill="x", pady=(0, 8))
+
+        ctk.CTkLabel(
+            inner,
+            text="When specified, this email's attachments will be included regardless of the option above.",
+            font=ctk.CTkFont(size=16), text_color=C["muted"],
+            wraplength=750, justify="left",
+        ).pack(anchor="w")
+
     def _build_type_section(self, parent):
         SectionHeader(parent, "WHAT TO DOWNLOAD").pack(anchor="w", padx=24, pady=(24, 10))
 
@@ -866,6 +895,7 @@ class App(ctk.CTk):
             scan_links       = self._scan_links_var.get(),
             email_direction  = self._direction_var.get(),
             sort_by_domain   = self._sort_var.get() == "Domain",
+            additional_email = self._additional_email_var.get().strip(),
         )
         self._worker = ExtractionWorker(cfg)
         self._thread = threading.Thread(target=self._worker.run, daemon=True)
