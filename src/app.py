@@ -23,15 +23,18 @@ from core import (
 )
 
 # Python 3.14 changed tkinter so event.widget can be a string name instead of
-# a widget object, which breaks customtkinter's scroll handler.
-import customtkinter.windows.widgets.ctk_scrollable_frame as _sf
-_orig_check = _sf.CTkScrollableFrame.check_if_master_is_canvas
-def _safe_check(self, widget):
-    try:
-        return _orig_check(self, widget)
-    except AttributeError:
-        return False
-_sf.CTkScrollableFrame.check_if_master_is_canvas = _safe_check
+# a widget object, which breaks customtkinter's scroll handler. Patch defensively.
+try:
+    import customtkinter.windows.widgets.ctk_scrollable_frame as _sf
+    _orig_check = _sf.CTkScrollableFrame.check_if_master_is_canvas
+    def _safe_check(self, widget):
+        try:
+            return _orig_check(self, widget)
+        except AttributeError:
+            return False
+    _sf.CTkScrollableFrame.check_if_master_is_canvas = _safe_check
+except (ImportError, AttributeError):
+    pass  # Patch not needed or customtkinter version doesn't have this structure
 
 # ── Theme ──────────────────────────────────────────────────────────────────
 ctk.set_appearance_mode("dark")
