@@ -894,35 +894,11 @@ class SheetsLogger:
         return ""
 
     def initialize(self):
-        """Locate or create the log spreadsheet; migrate schema if columns changed."""
-        if self._id_path.exists():
-            self._sheet_id = self._id_path.read_text(encoding="utf-8").strip()
-            try:
-                # Read the actual header row that is currently in the sheet
-                result = self._svc.spreadsheets().values().get(
-                    spreadsheetId=self._sheet_id,
-                    range="Log!1:1",
-                ).execute()
-                current = (result.get("values") or [[]])[0]
-                if current != SHEET_HEADERS:
-                    # Insert blank columns for any headers that are new,
-                    # which re-aligns all existing data rows with the new schema
-                    self._migrate_columns(current)
-            except Exception:
-                pass
-            # Always write the full header row (names the newly inserted blank columns)
-            try:
-                self._svc.spreadsheets().values().update(
-                    spreadsheetId=self._sheet_id,
-                    range="Log!A1",
-                    valueInputOption="RAW",
-                    body={"values": [SHEET_HEADERS]},
-                ).execute()
-            except Exception:
-                pass
-            return
+        """Create a new log spreadsheet for this extraction run."""
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         ss = self._svc.spreadsheets().create(body={
-            "properties": {"title": self.SHEET_TITLE},
+            "properties": {"title": f"{self.SHEET_TITLE} — {timestamp}"},
             "sheets": [{"properties": {"title": "Log"}}],
         }).execute()
         self._sheet_id = ss["spreadsheetId"]
@@ -932,51 +908,8 @@ class SheetsLogger:
             valueInputOption="RAW",
             body={"values": [SHEET_HEADERS]},
         ).execute()
+        # Save the new sheet ID (for reference, though each run creates a fresh one)
         self._id_path.write_text(self._sheet_id, encoding="utf-8")
-
-    def _migrate_columns(self, old_headers: list[str]) -> None:
-        """Insert blank columns at the positions of any new headers in SHEET_HEADERS.
-
-        Inserts left→right so each subsequent position index stays correct after
-        prior insertions shift everything right by one.
-        """
-        missing_positions = [
-            i for i, col in enumerate(SHEET_HEADERS)
-            if col not in old_headers
-        ]
-        if not missing_positions:
-            return
-
-        # Resolve the numeric sheetId for the 'Log' tab (needed by batchUpdate)
-        info = self._svc.spreadsheets().get(spreadsheetId=self._sheet_id).execute()
-        try:
-            sheet_gid = next(
-                s["properties"]["sheetId"]
-                for s in info["sheets"]
-                if s["properties"]["title"] == "Log"
-            )
-        except StopIteration:
-            return
-
-        requests = [
-            {
-                "insertDimension": {
-                    "range": {
-                        "sheetId": sheet_gid,
-                        "dimension": "COLUMNS",
-                        "startIndex": pos,
-                        "endIndex": pos + 1,
-                    },
-                    "inheritFromBefore": False,
-                }
-            }
-            for pos in missing_positions
-        ]
-        with _http_exec_lock:
-            self._svc.spreadsheets().batchUpdate(
-                spreadsheetId=self._sheet_id,
-                body={"requests": requests},
-            ).execute()
 
     def log_run_start(self, categories: set[str], direction: str) -> None:
         """Append a visual separator row marking the start of a new run."""
